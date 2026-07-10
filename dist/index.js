@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -27604,6 +27605,11 @@ var debug = (err) => {
 };
 var debugJSON = (data) => debug(JSON.stringify(data, null, 2));
 var info = (message) => console.log(message);
+var error = (err) => {
+  console.error("ERROR:");
+  console.error(err);
+  (0, import_core2.setFailed)(getError(err));
+};
 var getError = (err) => {
   if (err instanceof Error) {
     return err.message;
@@ -27616,11 +27622,6 @@ var getError = (err) => {
   } catch {
     return "Unknown error";
   }
-};
-var error = (err) => {
-  console.error("ERROR:");
-  console.error(getError(err));
-  (0, import_core2.setFailed)(getError(err));
 };
 var getAutoMerge = (value) => {
   const autoMerge = value || DEFAULT_AUTO_MERGE;
