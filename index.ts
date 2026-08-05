@@ -1,35 +1,57 @@
 import { getInput, setFailed } from '@actions/core'
 import { getOctokit } from '@actions/github'
-import { diff } from 'semver'
+import { diff, type ReleaseType } from 'semver'
 
 type Octokit = ReturnType<typeof getOctokit>
 type MergeMethod = 'merge' | 'squash' | 'rebase'
 
-const debug = (message: string | Error) => {
+const DEFAULT_MERGE_METHOD = 'merge'
+const DEFAULT_AUTO_MERGE = 'minor'
+const DEFAULT_PR_AUTHOR = 'dependabot[bot]'
+const RETRIES = 3
+const RETRY_DELAY_MS = 1000
+
+const debug = (err: unknown) => {
   if (getInput('debug')) {
-    console.log('DEBUG', message)
+    console.log('DEBUG', err)
   }
 }
 
-const debugJSON = (data: any) => debug(JSON.stringify(data, null, 2))
+const debugJSON = (data: object) => debug(JSON.stringify(data, null, 2))
 
 const info = (message: string) => console.log(message)
 
-const error = (err: Error) => {
+const error = (err: unknown) => {
   console.error('ERROR:')
   console.error(err)
-  setFailed(err.message)
+  setFailed(getError(err))
+}
+
+const getError = (err: unknown) => {
+  if (err instanceof Error) {
+    return err.message
+  }
+
+  if (typeof err === 'string') {
+    return err
+  }
+
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return 'Unknown error'
+  }
 }
 
 const getAutoMerge = (value: string): 'major' | 'minor' | 'patch' => {
-  const autoMerge = value || 'minor'
+  const autoMerge = value || DEFAULT_AUTO_MERGE
   if (autoMerge !== 'major' && autoMerge !== 'minor' && autoMerge !== 'patch')
     throw new Error(`Invalid auto-merge option: ${autoMerge}`)
   return autoMerge
 }
 
 const getMergeMethod = (value: string): MergeMethod => {
-  const mergeMethod = value || 'merge'
+  const mergeMethod = value || DEFAULT_MERGE_METHOD
   if (
     mergeMethod !== 'merge' &&
     mergeMethod !== 'squash' &&
@@ -39,43 +61,50 @@ const getMergeMethod = (value: string): MergeMethod => {
   return mergeMethod
 }
 
-const getVersionBumpFromTitle = (prTitle: string): string | null => {
-  try {
-    const fromVersion = prTitle
-      .split('from ')[1]
-      .split(' ')[0]
-      .split('\n')[0]
-      .substring(0, 8)
-      .trim()
-    const toVersion = prTitle
-      .split(' to ')[1]
-      .split(' ')[0]
-      .split('\n')[0]
-      .substring(0, 8)
-      .trim()
-    debug(
-      `Get versions from ${prTitle} => from version ${fromVersion} to version ${toVersion}`
-    )
-    if (fromVersion && toVersion) {
-      return diff(fromVersion, toVersion)
-    }
-  } catch (_err) {
-    // empty
+const getVersionBumpFromTitle = (prTitle: string): ReleaseType | null => {
+  const titleVersionRegex = /from\s+([^\s]+)\s+to\s+([^\s]+)/i
+  const match = prTitle.match(titleVersionRegex)
+  if (!match) {
+    return null
   }
-  return null
+
+  const [, fromVersion, toVersion] = match
+  debug(
+    `Get versions from ${prTitle} => from version ${fromVersion} to version ${toVersion}`
+  )
+
+  return diff(fromVersion, toVersion)
 }
 
 const getVersionBumpFromCommit = (
   commitMessage: string
-): 'major' | 'minor' | 'patch' | null => {
-  const updateTypeRegex = /update-type:\s*version-update:semver-(\w+)/g
-  const matches = [...commitMessage.matchAll(updateTypeRegex)]
+): ReleaseType | null => {
+  let bumpLevels: (ReleaseType | string | null)[]
+  if (
+    commitMessage
+      .trim()
+      .includes('These dependencies needed to be updated together.')
+  ) {
+    const fromToRegex =
+      /Updates\s+`[^`]+`\s+from\s+(\d+\.\d+\.\d+)\s+to\s+(\d+\.\d+\.\d+)/g
+    const matches = [...commitMessage.matchAll(fromToRegex)]
 
-  if (matches.length === 0) {
-    return null
+    if (matches.length === 0) {
+      return null
+    }
+
+    bumpLevels = matches.map((match) => diff(match[1], match[2]))
+  } else {
+    const updateTypeRegex = /update-type:\s*version-update:semver-(\w+)/g
+    const matches = [...commitMessage.matchAll(updateTypeRegex)]
+
+    if (matches.length === 0) {
+      return null
+    }
+
+    bumpLevels = matches.map((match) => match[1])
   }
 
-  const bumpLevels = matches.map((match) => match[1])
   debug(`Found update types in commit: ${bumpLevels.join(', ')}`)
 
   // Return the highest bump level (major > minor > patch)
@@ -108,8 +137,8 @@ const approve = async (
       event: 'APPROVE',
     })
     return true
-  } catch (err: any) {
-    info(`Approve failed: ${err.message}`)
+  } catch (err: unknown) {
+    info(`Approve failed: ${getError(err)}`)
     debug(err)
     return false
   }
@@ -124,8 +153,7 @@ const merge = async (
     mergeMethod: MergeMethod
   }
 ): Promise<boolean> => {
-  const retries = 3
-  for (let i = 1; i <= retries; i++) {
+  for (let i = 1; i <= RETRIES; i++) {
     try {
       await octokit.rest.pulls.merge({
         owner: options.owner,
@@ -134,11 +162,11 @@ const merge = async (
         merge_method: options.mergeMethod,
       })
       return true
-    } catch (err: any) {
-      info(`Merge failed (attempt ${i}/${retries}): ${err.message}`)
+    } catch (err: unknown) {
+      info(`Merge failed (attempt ${i}/${RETRIES}): ${getError(err)}`)
       debug(err)
-      if (i < retries) {
-        await new Promise((r) => setTimeout(r, 1000))
+      if (i < RETRIES) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS))
       }
     }
   }
@@ -152,7 +180,7 @@ const run = async () => {
   }
 
   const [owner, repo] = (process.env.GITHUB_REPOSITORY || '').split('/')
-  const prAuthor = getInput('pr-author') || 'dependabot[bot]'
+  const prAuthor = getInput('pr-author') || DEFAULT_PR_AUTHOR
   const octokit = getOctokit(token)
   const autoMerge = getAutoMerge(getInput('auto-merge'))
   const mergeMethod = getMergeMethod(getInput('merge-method'))
@@ -167,8 +195,8 @@ const run = async () => {
     const prNumber = pr.number
     const prTitle = pr.title
 
-    info(`Processing PR ${prNumber}: ${prTitle}`)
-    const lastCommitHash = pr._links.statuses.href.split('/').pop() || ''
+    info(`Processing PR #${prNumber}: ${prTitle}`)
+    const lastCommitHash = pr.head.sha
     const checkRuns = await octokit.rest.checks.listForRef({
       owner,
       repo,
@@ -179,8 +207,15 @@ const run = async () => {
       (run) => run.conclusion !== 'skipped'
     )
 
+    const checksWereRun = nonSkippedCheckRuns.length > 0
+    if (!checksWereRun) {
+      info('No checks were run')
+      debugJSON(checkRuns.data)
+      continue
+    }
+
     const allChecksHaveSucceeded =
-      nonSkippedCheckRuns.length > 0 &&
+      checksWereRun &&
       nonSkippedCheckRuns.every(
         (run) => run.conclusion === 'success' || run.conclusion === 'neutral'
       )
@@ -195,10 +230,16 @@ const run = async () => {
       repo,
       ref: lastCommitHash,
     })
-    const uniqueStatuses = statuses.data.filter(
-      (item, index, self) =>
-        self.map((i) => i.context).indexOf(item.context) === index
-    )
+    const seenContexts = new Set<string>()
+    const uniqueStatuses = statuses.data.filter((item) => {
+      if (seenContexts.has(item.context)) {
+        return false
+      }
+
+      seenContexts.add(item.context)
+      return true
+    })
+
     const allStatusesHaveSucceeded = uniqueStatuses.every(
       (run) => run.state === 'success'
     )
@@ -215,7 +256,8 @@ const run = async () => {
       pull_number: prNumber,
     })
     const commitMessage = commits.data[0]?.commit?.message || ''
-    let versionBump: string | null = getVersionBumpFromCommit(commitMessage)
+    let versionBump: ReleaseType | null =
+      getVersionBumpFromCommit(commitMessage)
 
     // Fallback to parsing PR title (works for indirect security updates)
     if (!versionBump) {
@@ -230,9 +272,13 @@ const run = async () => {
         (autoMerge === 'major' || autoMerge === 'minor')) ||
       versionBump === 'patch'
     ) {
-      info('Approve and merge')
-      await approve(octokit, { owner, repo, prNumber })
-      await merge(octokit, { owner, repo, prNumber, mergeMethod })
+      info('Approving and merging')
+      if (await approve(octokit, { owner, repo, prNumber })) {
+        info('Approved successfully')
+        if (await merge(octokit, { owner, repo, prNumber, mergeMethod })) {
+          info('Merged successfully')
+        }
+      }
     } else {
       info(`Not merging ${versionBump}`)
     }
