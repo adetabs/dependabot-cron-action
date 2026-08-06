@@ -27645,7 +27645,11 @@ var getVersionBumpFromTitle = (prTitle) => {
   debug(
     `Get versions from ${prTitle} => from version ${fromVersion} to version ${toVersion}`
   );
-  return (0, import_semver.diff)(fromVersion, toVersion);
+  try {
+    return (0, import_semver.diff)(fromVersion, toVersion);
+  } catch {
+    return null;
+  }
 };
 var getVersionBumpFromCommit = (commitMessage) => {
   let bumpLevels;

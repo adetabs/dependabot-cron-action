@@ -73,7 +73,11 @@ const getVersionBumpFromTitle = (prTitle: string): ReleaseType | null => {
     `Get versions from ${prTitle} => from version ${fromVersion} to version ${toVersion}`
   )
 
-  return diff(fromVersion, toVersion)
+  try {
+    return diff(fromVersion, toVersion)
+  } catch {
+    return null
+  }
 }
 
 const getVersionBumpFromCommit = (
